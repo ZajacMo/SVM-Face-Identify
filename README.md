@@ -1,5 +1,7 @@
 # FaceIdentify Face Recognition System
 
+[中文](README_CN.md)
+
 ## Project Overview
 This project implements a face recognition system based on Backpropagation (BP) Neural Network and Support Vector Machine (SVM), using the CASIA-FaceV5 dataset for training and testing. The system provides a complete machine learning workflow, including data preprocessing, model training, performance evaluation, and result visualization, aiming to offer a simple yet effective face recognition solution.
 
