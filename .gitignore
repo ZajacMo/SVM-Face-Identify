@@ -157,3 +157,12 @@ config/local.json
 
 # CI artefacts produced by the smoke test
 ci-results/
+
+# Generated per-run metric files. These are produced by every pipeline run
+# and would otherwise leave the working tree dirty each time.
+results/summary.json
+results/svm_metrics.json
+
+# The generated synthetic dataset. It is reproducible from --synthetic, so it
+# does not belong in version control.
+results/synthetic_dataset/
