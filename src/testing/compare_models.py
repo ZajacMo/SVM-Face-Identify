@@ -1,143 +1,235 @@
-import os
+"""Head-to-head comparison of the BP neural network and the SVM."""
+
+from __future__ import annotations
+
+import datetime
 import json
+import os
+import pickle
+from typing import Dict, List, Optional, Sequence
+
 import numpy as np
 from sklearn.metrics import accuracy_score
-import pickle
-import matplotlib.pyplot as plt
-import sys
-import datetime
-from pathlib import Path
 
-# 添加项目根目录到Python路径
-project_root = Path(__file__).parent.parent.parent
-sys.path.append(str(project_root))
-
-from src.utils.utils import preprocess_image
+from src.data.dataset import build_class_mapping
+from src.testing.metrics import classification_metrics, format_report, save_metrics
 from src.training.svm_classifier import SVMClassifier
+from src.utils.utils import preprocess_image
+
+__all__ = ["ModelComparer", "compare"]
+
 
 class ModelComparer:
-    def __init__(self):
+    """Loads both models and evaluates them on the same test manifest.
+
+    Attributes:
+        bp_model: The unpickled BP neural network, if loaded.
+        svm_model: The :class:`SVMClassifier`, if loaded.
+        test_data: Feature matrix of the test set.
+        test_labels: Integer labels of the test set.
+        class_to_idx: Label to index mapping shared by both models.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty comparer."""
         self.bp_model = None
-        self.svm_model = None
-        self.test_data = None
-        self.test_labels = None
-        self.class_to_idx = None
+        self.svm_model: Optional[SVMClassifier] = None
+        self.test_data: Optional[np.ndarray] = None
+        self.test_labels: Optional[np.ndarray] = None
+        self.class_to_idx: Dict[str, int] = {}
 
-    def load_bp_model(self, model_path, labels_path):
-        class CustomUnpickler(pickle.Unpickler):
-                def find_class(self, module, name):
-                    if module == 'utils' and name == 'BPNeuralNetwork':
-                        from src.utils.utils import BPNeuralNetwork
-                        return BPNeuralNetwork
-                    return super().find_class(module, name)
+    def load_bp_model(
+        self, model_path: str, labels_path: str
+    ) -> "ModelComparer":
+        """Load the BP network and its class mapping.
 
-        with open(model_path, 'rb') as f:
-            self.bp_model = CustomUnpickler(f).load()
-        with open(labels_path, 'rb') as f:
+        Args:
+            model_path: Path to the pickled network.
+            labels_path: Path to the pickled class mapping.
+
+        Returns:
+            ``self``, so calls can be chained.
+        """
+        with open(model_path, "rb") as f:
+            self.bp_model = pickle.load(f)
+        with open(labels_path, "rb") as f:
             self.class_to_idx = pickle.load(f)
         return self
 
-    def load_svm_model(self, model_path):
+    def load_svm_model(self, model_path: str) -> "ModelComparer":
+        """Load the SVM model.
+
+        Args:
+            model_path: Path to the pickled SVM.
+
+        Returns:
+            ``self``, so calls can be chained.
+        """
         self.svm_model = SVMClassifier.load_model(model_path)
         return self
 
-    def load_test_data(self, test_labels_path, image_size=(32, 32)):
-        with open(test_labels_path, 'r') as f:
+    def load_test_data(
+        self,
+        test_labels_path: str,
+        image_size: Sequence[int] = (32, 32),
+    ) -> "ModelComparer":
+        """Load the test manifest into feature and label arrays.
+
+        Args:
+            test_labels_path: Path to the test manifest.
+            image_size: Target ``(width, height)`` in pixels.
+
+        Returns:
+            ``self``, so calls can be chained.
+        """
+        with open(test_labels_path, "r", encoding="utf-8") as f:
             test_samples = json.load(f)
 
-        X = []
-        y = []
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+        features: List[np.ndarray] = []
+        labels: List[int] = []
         for sample in test_samples:
-            img_path = os.path.join(project_root, sample['path'])
-            if os.path.exists(img_path):
-                img_array = preprocess_image(img_path, image_size)
-                X.append(img_array)
-                y.append(self.class_to_idx[sample['label']])
+            img_path = sample["path"]
+            if not os.path.exists(img_path):
+                continue
+            features.append(preprocess_image(img_path, tuple(image_size)))
+            if sample["label"] in self.class_to_idx:
+                labels.append(self.class_to_idx[sample["label"]])
 
-        self.test_data = np.array(X)
-        self.test_labels = np.array(y)
+        self.test_data = np.asarray(features, dtype=np.float64)
+        self.test_labels = np.asarray(labels, dtype=np.int64)
         return self
 
-    def evaluate_bp(self):
+    def evaluate_bp(self) -> Dict[str, object]:
+        """Evaluate the BP neural network.
+
+        Returns:
+            A dictionary with the accuracy, the metrics and the predictions.
+
+        Raises:
+            ValueError: If the model or the test data is missing.
+        """
         if self.bp_model is None or self.test_data is None:
-            raise ValueError("BP模型或测试数据未加载")
+            raise ValueError("BP model or test data has not been loaded")
 
-        bp_predictions = []
-        for img in self.test_data:
-            output = self.bp_model.forward(img.reshape(1, -1))
-            bp_predictions.append(np.argmax(output))
-
-        bp_accuracy = np.mean(np.array(bp_predictions) == self.test_labels)
+        predictions = [
+            int(np.argmax(self.bp_model.forward(img.reshape(1, -1))[0]))
+            for img in self.test_data
+        ]
+        metrics = classification_metrics(self.test_labels, predictions)
         return {
-            'accuracy': bp_accuracy,
-            'predictions': bp_predictions
+            "accuracy": float(
+                accuracy_score(self.test_labels, np.asarray(predictions))
+            ),
+            "metrics": metrics,
+            "predictions": predictions,
         }
 
-    def evaluate_svm(self):
+    def evaluate_svm(self) -> Dict[str, object]:
+        """Evaluate the SVM.
+
+        Returns:
+            A dictionary with the accuracy, the metrics and the predictions.
+
+        Raises:
+            ValueError: If the model or the test data is missing.
+        """
         if self.svm_model is None or self.test_data is None:
-            raise ValueError("SVM模型或测试数据未加载")
+            raise ValueError("SVM model or test data has not been loaded")
 
-        svm_predictions = self.svm_model.predict(self.test_data)
-        svm_accuracy = accuracy_score(self.test_labels, svm_predictions)
+        predictions = self.svm_model.predict(self.test_data)
+        metrics = classification_metrics(self.test_labels, predictions)
         return {
-            'accuracy': svm_accuracy,
-            'predictions': svm_predictions.tolist()
+            "accuracy": float(accuracy_score(self.test_labels, predictions)),
+            "metrics": metrics,
+            "predictions": predictions.tolist(),
         }
 
-    def compare(self, output_dir='results/comparison'):
+    def compare(self, output_dir: str = "results/comparison") -> Dict[str, object]:
+        """Evaluate both models and write the comparison artefacts.
+
+        Args:
+            output_dir: Directory for the JSON results and the bar chart.
+
+        Returns:
+            A dictionary with the accuracy of both models.
+        """
         os.makedirs(output_dir, exist_ok=True)
 
-        # 评估两个模型
         bp_results = self.evaluate_bp()
         svm_results = self.evaluate_svm()
 
-        # 保存数值结果
-        comparison_results = {
-            'bp_accuracy': bp_results['accuracy'],
-            'svm_accuracy': svm_results['accuracy'],
-            'test_samples': len(self.test_labels),
-            'comparison_date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        comparison = {
+            "bp_accuracy": bp_results["accuracy"],
+            "svm_accuracy": svm_results["accuracy"],
+            "bp_metrics": bp_results["metrics"],
+            "svm_metrics": svm_results["metrics"],
+            "test_samples": int(len(self.test_labels)),
+            "comparison_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        save_metrics(comparison, os.path.join(output_dir, "comparison_results.json"))
 
-        with open(os.path.join(output_dir, 'comparison_results.json'), 'w') as f:
-            json.dump(comparison_results, f, indent=2)
+        self._plot_comparison(bp_results["accuracy"], svm_results["accuracy"], output_dir)
 
-        # 绘制准确率对比图
-        # 设置中文字体支持，移除找不到的字体
-        plt.rcParams["font.family"] = ["SimHei"]
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
-        plt.figure(figsize=(10, 6))
-        models = ['BP神经网络', 'SVM']
-        accuracies = [bp_results['accuracy'], svm_results['accuracy']]
+        print("Model comparison finished.")
+        print(f"BP neural network accuracy: {bp_results['accuracy']:.4f}")
+        print(f"SVM accuracy: {svm_results['accuracy']:.4f}")
+        print(f"Results written to {output_dir}")
+        return comparison
 
-        plt.bar(models, accuracies, color=['blue', 'orange'])
-        plt.ylim(0, 1.0)
-        plt.ylabel('准确率')
-        plt.title('BP神经网络与SVM分类准确率对比')
-        plt.xticks(rotation=45)
+    @staticmethod
+    def _plot_comparison(bp_accuracy: float, svm_accuracy: float, output_dir: str) -> None:
+        """Render the accuracy bar chart.
 
-        # 在柱状图上显示准确率数值
-        for i, v in enumerate(accuracies):
-            plt.text(i, v + 0.02, f'{v:.4f}', ha='center')
+        Args:
+            bp_accuracy: Accuracy of the BP neural network.
+            svm_accuracy: Accuracy of the SVM.
+            output_dir: Directory in which the PNG is written.
+        """
+        import matplotlib
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'accuracy_comparison.png'))
-        plt.close()
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
 
-        print("模型比较完成！")
-        print(f"BP神经网络准确率: {bp_results['accuracy']:.4f}")
-        print(f"SVM准确率: {svm_results['accuracy']:.4f}")
-        print(f"比较结果已保存至 {output_dir}")
+        figure, axis = plt.subplots(figsize=(10, 6))
+        models = ["BP neural network", "SVM"]
+        accuracies = [bp_accuracy, svm_accuracy]
+        bars = axis.bar(models, accuracies, color=["blue", "orange"])
+        axis.set_ylim(0, 1.0)
+        axis.set_ylabel("Accuracy")
+        axis.set_title("Classification accuracy: BP neural network vs SVM")
+        for bar, value in zip(bars, accuracies):
+            axis.text(
+                bar.get_x() + bar.get_width() / 2,
+                value + 0.02,
+                f"{value:.4f}",
+                ha="center",
+            )
+        figure.tight_layout()
+        figure.savefig(os.path.join(output_dir, "accuracy_comparison.png"), dpi=150)
+        plt.close(figure)
 
-def compare():
+
+def compare(
+    bp_model_path: str = "results/face_model.pkl",
+    labels_path: str = "results/class_labels.pkl",
+    svm_model_path: str = "results/svm_face_model.pkl",
+    test_labels_path: str = "labels/test_labels.json",
+    output_dir: str = "results/comparison",
+) -> Dict[str, object]:
+    """Compare the two models on a test manifest.
+
+    Args:
+        bp_model_path: Path to the pickled BP network.
+        labels_path: Path to the pickled class mapping.
+        svm_model_path: Path to the pickled SVM.
+        test_labels_path: Path to the test manifest.
+        output_dir: Directory for the comparison artefacts.
+
+    Returns:
+        The comparison dictionary.
+    """
     comparer = ModelComparer()
-    comparer.load_bp_model('results/face_model.pkl', 'results/class_labels.pkl')
-    comparer.load_svm_model('results/svm_face_model.pkl')
-    comparer.load_test_data('labels/test_labels.json')
-    comparer.compare()
-
-
-if __name__ == '__main__':
-    compare()
+    comparer.load_bp_model(bp_model_path, labels_path)
+    comparer.load_svm_model(svm_model_path)
+    comparer.load_test_data(test_labels_path)
+    return comparer.compare(output_dir)

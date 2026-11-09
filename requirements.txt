@@ -1,6 +1,9 @@
-numpy==1.26.0
-requests==2.31.0
-Pillow==10.0.0
-matplotlib==3.8.0
-seaborn==0.12.2
-scikit-learn==1.2.2
+# Runtime dependencies
+numpy>=1.24,<2.0
+Pillow>=10.0
+matplotlib>=3.7
+seaborn>=0.12
+scikit-learn>=1.2
+
+# Development / test dependencies
+pytest>=7.0

@@ -1,94 +1,107 @@
+"""Training of the from-scratch BP neural network baseline."""
+
+from __future__ import annotations
+
 import os
-import json
-import numpy as np
-from PIL import Image
-import sys
-from pathlib import Path
-
-# 添加项目根目录到Python路径
-project_root = Path(__file__).parent.parent.parent
-sys.path.append(str(project_root))
-
-from src.utils.utils import BPNeuralNetwork, preprocess_image
 import pickle
+from typing import Dict, List, Optional, Tuple
 
-def load_casia_dataset(label_file, image_size=(32, 32)):
-    X = []
-    y = []
-    
-    # 读取标签文件
-    with open(label_file, 'r') as f:
-        data = json.load(f)
-    
-    # 提取所有唯一标签并排序
-    labels = [entry['label'] for entry in data]
-    unique_labels = sorted(list(set(labels)), key=lambda x: int(x))
-    class_to_idx = {label: i for i, label in enumerate(unique_labels)}
-    
-    # 加载图像数据
-    for entry in data:
-        img_path = entry['path']
-        img_array = preprocess_image(img_path, image_size)
-        X.append(img_array)
-        y.append(class_to_idx[entry['label']])
-    
-    # 转换为numpy数组
-    X = np.array(X)
-    y = np.array(y, dtype=np.int32)  # 确保y是整数类型
-    
-    # 对标签进行one-hot编码
-    num_classes = len(unique_labels)
-    y_onehot = np.zeros((y.shape[0], num_classes))
-    y_onehot[np.arange(y.shape[0]), y] = 1
-    
-    return X, y_onehot, class_to_idx
+import numpy as np
 
-def train():
-    # 配置参数
-    DATA_DIR = 'labels/train_labels.json'
-    IMAGE_SIZE = (32, 32)
-    HIDDEN_SIZE = 128
-    EPOCHS = 1000
-    LEARNING_RATE = 0.01
-    BATCH_SIZE = 32
-    MODEL_SAVE_PATH = 'results/face_model.pkl'
-    LABELS_SAVE_PATH = 'results/class_labels.pkl'
-    
-    # 加载数据集
-    print(f"Loading CASIA-FaceV5 dataset from {DATA_DIR}...")
-    X, y, class_to_idx = load_casia_dataset(DATA_DIR, IMAGE_SIZE)
-    print(f"Dataset loaded: {X.shape[0]} images, {len(class_to_idx)} classes")
-    
-    # 初始化神经网络
-    input_size = IMAGE_SIZE[0] * IMAGE_SIZE[1] * 3  # RGB图像
-    output_size = len(class_to_idx)
-    model = BPNeuralNetwork(input_size, HIDDEN_SIZE, output_size)
-    
-    # 训练模型
+from src.data.dataset import ClassMapping, FaceDataset, build_class_mapping
+from src.utils.utils import BPNeuralNetwork
+
+__all__ = ["load_casia_dataset", "train"]
+
+
+def load_casia_dataset(
+    label_file: str,
+    image_size: Tuple[int, int] = (32, 32),
+    mapping: Optional[ClassMapping] = None,
+) -> Tuple[np.ndarray, np.ndarray, ClassMapping]:
+    """Load a manifest into features and one-hot encoded targets.
+
+    Args:
+        label_file: Path to the JSON manifest.
+        image_size: Target ``(width, height)`` in pixels.
+        mapping: Class mapping to reuse. When omitted, a mapping is built from
+            the manifest itself.
+
+    Returns:
+        A triple ``(features, one_hot_labels, mapping)``.
+    """
+    dataset = FaceDataset.from_manifest(label_file, mapping, image_size)
+    return dataset.features, dataset.one_hot_labels(), dataset.mapping
+
+
+def train(
+    data_dir: str = "labels/train_labels.json",
+    model_save_path: str = "results/face_model.pkl",
+    labels_save_path: str = "results/class_labels.pkl",
+    history_save_path: str = "results/training_history.pkl",
+    image_size: Tuple[int, int] = (32, 32),
+    hidden_size: int = 128,
+    epochs: int = 1000,
+    learning_rate: float = 0.01,
+    batch_size: int = 32,
+    seed: int = 42,
+) -> Dict[str, object]:
+    """Train the BP neural network and persist the artefacts.
+
+    Args:
+        data_dir: Path to the training manifest.
+        model_save_path: Where to write the pickled network.
+        labels_save_path: Where to write the pickled class mapping.
+        history_save_path: Where to write the pickled training history.
+        image_size: Target ``(width, height)`` in pixels.
+        hidden_size: Number of units in the hidden layer.
+        epochs: Number of training epochs.
+        learning_rate: Step size for the gradient update.
+        batch_size: Number of samples per gradient step.
+        seed: Seed applied before weight initialisation and shuffling.
+
+    Returns:
+        A dictionary describing the training run.
+    """
+    np.random.seed(seed)
+
+    X, y_onehot, mapping = load_casia_dataset(data_dir, image_size)
+    print(
+        f"Dataset loaded: {X.shape[0]} images, {len(mapping)} classes "
+        f"from {data_dir}"
+    )
+
+    input_size = image_size[0] * image_size[1] * 3
+    output_size = len(mapping)
+    model = BPNeuralNetwork(input_size, hidden_size, output_size, seed=seed)
+
     print("Starting model training...")
-    model.train(X, y, EPOCHS, LEARNING_RATE, BATCH_SIZE)
-    
-    # 保存模型和标签
-    with open(MODEL_SAVE_PATH, 'wb') as f:
-        pickle.dump(model, f)
-    
-    with open(LABELS_SAVE_PATH, 'wb') as f:
-        pickle.dump(class_to_idx, f)
-    
-    # 保存训练历史数据
-    training_history = {
-        'loss_history': model.loss_history,
-        'learning_rate': model.learning_rate,
-        'epochs': EPOCHS,
-        'batch_size': BATCH_SIZE
-    }
-    os.makedirs('results', exist_ok=True)
-    with open('results/training_history.pkl', 'wb') as f:
-        pickle.dump(training_history, f)
-    
-    print(f"模型已保存至 {MODEL_SAVE_PATH}")
-    print(f"类别标签已保存至 {LABELS_SAVE_PATH}")
-    print(f"训练历史数据已保存至 training_history.pkl")
+    model.train(
+        X, y_onehot, epochs, learning_rate, batch_size, seed=seed
+    )
 
-if __name__ == '__main__':
-    train()
+    os.makedirs(os.path.dirname(os.path.abspath(model_save_path)), exist_ok=True)
+    with open(model_save_path, "wb") as f:
+        pickle.dump(model, f)
+    with open(labels_save_path, "wb") as f:
+        pickle.dump(mapping.class_to_idx, f)
+
+    history = {
+        "loss_history": model.loss_history,
+        "learning_rate": learning_rate,
+        "epochs": epochs,
+        "batch_size": batch_size,
+    }
+    with open(history_save_path, "wb") as f:
+        pickle.dump(history, f)
+
+    print(f"Model saved to {model_save_path}")
+    print(f"Class labels saved to {labels_save_path}")
+    print(f"Training history saved to {history_save_path}")
+
+    return {
+        "train_samples": int(X.shape[0]),
+        "num_classes": output_size,
+        "final_loss": model.loss_history[-1][1] if model.loss_history else None,
+        "loss_history": model.loss_history,
+    }
